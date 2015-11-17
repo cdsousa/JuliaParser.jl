@@ -691,6 +691,58 @@ function skipws_and_comments(ts::TokenStream)
     return ts
 end
 
+
+function read_multiline_comment(ts::TokenStream, count::Int, dest::IOBuffer)
+    start, unterminated = -1, true
+    while !eof(ts)
+        c = readchar(ts)
+        write(dest, c)
+        # if "=#" token, decrement the count.
+        # If count is zero, break out of the loop
+        if c === '='
+            start > 0 || (start = position(ts))
+            if peekchar(ts) === '#' && position(ts) != start
+                write(dest, readchar(ts))
+                count <= 1 || (count -= 1; continue)
+                unterminated = false
+                break
+            end
+            continue
+        # if "#=" token increase count
+        elseif c === '#' && peekchar(ts) === '='
+            count += 1
+        end
+    end
+    if unterminated
+        throw(ParseError("incomplete: unterminated multi-line comment #= ... =#"))
+    end
+    return ts
+end
+
+function read_to_eol(io::IO, dest::IOBuffer)
+    while !eof(io)
+        nc = peekchar(io)
+        nc === '\n' && break
+        Base.skip(io, utf8sizeof(nc))
+        write(dest, nc)
+    end
+end
+read_to_eol(ts::TokenStream, dest::IOBuffer) = read_to_eol(ts.io, dest)
+
+function read_comment(ts::TokenStream)
+    c = readchar(ts)
+    @assert c === '#'
+    buf = IOBuffer()
+    write(buf, c)
+    if peekchar(ts) === '='
+        read_multiline_comment(ts, 1, buf)
+    else
+        read_to_eol(ts,  buf)
+    end
+    return takebuf_string(buf)
+end
+
+
 function accum_julia_symbol(ts::TokenStream, c::Char)
     nc, charr = c, Char[]
     while is_identifier_char(nc)
@@ -710,7 +762,8 @@ end
 
 #= Token stream methods =#
 
-function next_token(ts::TokenStream, whitespace_newline::Bool)
+
+function next_token(ts::TokenStream, whitespace_newline::Bool=false, include_comments::Bool=false)
     ts.ateof && return EOF
     tmp = skipws(ts, whitespace_newline)
     tmp == EOF && return EOF
@@ -724,11 +777,15 @@ function next_token(ts::TokenStream, whitespace_newline::Bool)
             skip(ts, 1)
             continue
         elseif c === '#'
-            skipcomment(ts)
-            if whitespace_newline && peekchar(ts) === '\n'
-                takechar(ts)
+            if include_comments
+                return read_comment(ts)
+            else
+                skipcomment(ts)
+                if whitespace_newline && peekchar(ts) === '\n'
+                    takechar(ts)
+                end
+                continue
             end
-            continue
         elseif isnewline(c)
             return readchar(ts)
         elseif is_special_char(c)
@@ -764,6 +821,7 @@ function next_token(ts::TokenStream, whitespace_newline::Bool)
     ts.ateof = true
     return EOF
 end
+
 
 next_token(ts::TokenStream) = next_token(ts, false)
 last_token(ts::TokenStream) = ts.lasttoken
